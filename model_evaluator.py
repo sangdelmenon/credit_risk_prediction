@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,6 +14,10 @@ from sklearn.metrics import (
     precision_recall_curve,
     classification_report
 )
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 
 class ModelEvaluator:
     def __init__(self, models=None):
@@ -39,12 +42,20 @@ class ModelEvaluator:
         print(results_df)
 
         self.plot_roc_curves(X_test, y_test, save_path)
+        
+        # Determine best model based on AUC-ROC
         best_model_name = results_df['AUC-ROC'].idxmax()
         best_model = self.models[best_model_name]
+        print(f"\nBest Model: {best_model_name}")
 
         self.plot_confusion_matrix(best_model, X_test, y_test, save_path)
         self.plot_feature_importance(best_model, X_test.columns, save_path)
-        self.plot_shap_summary(best_model, X_test, save_path)
+
+        # Only plot SHAP for tree-based models
+        if isinstance(best_model, (RandomForestClassifier, XGBClassifier, LGBMClassifier)):
+            self.plot_shap_summary(best_model, X_test, save_path)
+        else:
+            print(f"Skipping SHAP summary plot for {best_model_name} as it's not a tree-based model compatible with TreeExplainer.")
 
         return best_model_name, best_model
 
@@ -85,14 +96,30 @@ class ModelEvaluator:
             plt.xlabel('Relative Importance')
             plt.savefig(f'{save_path}feature_importance.png')
             plt.close()
+        else:
+            print(f"Skipping feature importance plot for {model.__class__.__name__} as it does not have 'feature_importances_'.")
+
 
     def plot_shap_summary(self, model, X_test, save_path):
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_test)
-        plt.figure(figsize=(10, 8))
-        shap.summary_plot(shap_values, X_test, show=False)
-        plt.savefig(f'{save_path}shap_summary.png', bbox_inches='tight')
-        plt.close()
+        # TreeExplainer is suitable for tree-based models.
+        # For other models, KernelExplainer or LinearExplainer might be needed.
+        # Given the context, we're expecting tree-based models to be best.
+        if isinstance(model, (RandomForestClassifier, XGBClassifier, LGBMClassifier)):
+            explainer = shap.TreeExplainer(model)
+            # Take a sample of X_test for SHAP to speed up computation if X_test is very large
+            if X_test.shape[0] > 1000:
+                X_sample = X_test.sample(n=1000, random_state=42)
+            else:
+                X_sample = X_test
+            shap_values = explainer.shap_values(X_sample)
+            
+            plt.figure(figsize=(10, 8))
+            shap.summary_plot(shap_values, X_sample, show=False)
+            plt.savefig(f'{save_path}shap_summary.png', bbox_inches='tight')
+            plt.close()
+        else:
+            print(f"Skipping SHAP summary plot for {model.__class__.__name__} as it's not a tree-based model compatible with TreeExplainer.")
+
 
 if __name__ == '__main__':
     from data_loader import LoanDataGenerator
@@ -100,13 +127,23 @@ if __name__ == '__main__':
     from model_trainer import ModelTrainer
 
     # Generate and prepare data
-    generator = LoanDataGenerator(n_samples=1000)
+    generator = LoanDataGenerator(n_samples=1000, random_state=42)
     data = generator.generate_data()
-    X_train_raw, X_test_raw, _, y_train, y_test, _ = generator.split_data()
+    X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test = generator.split_data()
     
     feature_engineer = FeatureEngineer()
     X_train = feature_engineer.fit_transform(X_train_raw)
     X_test = feature_engineer.transform(X_test_raw)
+
+    # Align columns after dummy variable creation
+    train_cols = X_train.columns
+    test_cols = X_test.columns
+
+    missing_in_test = set(train_cols) - set(test_cols)
+    for c in missing_in_test:
+        X_test[c] = 0
+    X_test = X_test[train_cols]
+
 
     # Train models
     trainer = ModelTrainer()
@@ -121,5 +158,6 @@ if __name__ == '__main__':
 
     # Evaluate models
     evaluator = ModelEvaluator(models)
-    evaluator.evaluate_models(X_test, y_test)
+    best_model_name, best_model = evaluator.evaluate_models(X_test, y_test)
     print("\nModel evaluation complete. Plots saved to ./visualizations/")
+    print(f"The best model is {best_model_name}")
